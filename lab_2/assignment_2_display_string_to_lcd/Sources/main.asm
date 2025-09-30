@@ -24,58 +24,63 @@ ROMStart    EQU  $4000  ; absolute address to place my code/constant data
 LCD_DATA     EQU   PTS    ; LCD data port S, pins PS7..4
 LCD_CONTROL  EQU   PORTE  ; LCD control port E. Pins PE7 (RST), PE4 (EN)
 LCD_EN       EQU   $10    ; LCD enable signal, pin PE4
-LCD_RST      EQU   $80    ; LCD reset signal, pin PE7
+LCD_RS      EQU   $80    ; LCD reset signal, pin PE7
 
 ; code section
-            ORG   ROMStart
-            
+            ORG   $3000
+hex1        FCB   $41
+hex2        FCB   $43
 
+mem1        RMB   01
+mem2        RMB   01
+mem3        RMB   01
+mem4        RMB   01
+mem5        RMB   01            
 
+            ORG   $4000
 Entry:
 ; Setup code
 _Startup:
-            LDS   #RAMEnd+1       ; initialize the stack pointer
-
-            CLI                   
+            LDS   #$4000       ; initialize the stack pointer          
             
             JSR   lcdInit         ; initialise 
 
-msg         dc.b "Hello World",0  ; Set message to "Hello World"
 
 
 MainLoop  
             JSR   lcdClear        ; clear LCD
             
-            LDX   msg             ; Load msg to ACCX
+            LDX   #msg             ; Load msg to ACCX
             JSR   lcdWriteString  ; Write String @ ACCX -> LCD 
             
             LDAA  $3000           ; Load contents at 3000 -> ACCA  
             JSR   leftHLF         ; convert left half of A into ASCII
-            STAA  $6000           ; Store the ascii byte into mem1 ($6000)
+            STAA  mem1           ; Store the ascii byte into mem1 ($6000)
             
             LDAA  $3000           ; Load contents at 3000 -> ACCA  
             JSR   rightHLF         ; convert right half of A into ASCII
-            STAA  $6001           ; Store the ascii byte into mem2 ($6001)
+            STAA  mem2           ; Store the ascii byte into mem2 ($6001)
             
             LDAA  $3001           ; Load contents at 3001 -> ACCA  
             JSR   leftHLF         ; convert left half of A into ASCII
-            STAA  $6002           ; Store the ascii byte into mem3 ($6002)
+            STAA  mem3           ; Store the ascii byte into mem3 ($6002)
             
             LDAA  $3001           ; Load contents at 3001 -> ACCA  
             JSR   rightHLF        ; convert right half of A into ASCII
-            STAA  $6003           ; Store the ascii byte into mem4 ($6003)
+            STAA  mem4           ; Store the ascii byte into mem4 ($6003)
             
-            LDAA  #$0000          ; Load 0000 into A (NULL char)
-            STAA  $6004           ; Store string termination character 00 into mem5 ($6004)
+            LDAA  0             ; Load 0000 into A (NULL char)
+            STAA  mem5           ; Store string termination character 00 into mem5 ($6004)
             
-            LDX   #$6000          ; Load the 4 ASCII characters 
+            LDX   #mem1          ; Load the 4 ASCII characters 
             JSR   lcdWriteString  ; Output the 4 ASCII characters
             
-            LDY   #$0002          ; Delay = 1s
+            LDY   #20000          ; Delay = 1s
             JSR   delay_50us
             
             BRA   MainLoop        ; Force branch to MainLoop      
-            
+
+msg         dc.b "Hello World",0  ; Set message to "Hello World"            
 ;**************************************************************
 ;*                       Subroutines                          *
 ;**************************************************************
@@ -84,27 +89,27 @@ MainLoop
 ; ********************* Internal Commands *********************
 ; delay_50us - delay for {Y} x 50us. E-clk - 41,67ns.
 delay_50us:   
-            PSHX                    ;2 E-clk
-eloop:      LDX   #30               ;2 E-clk -
-iloop:      PSHA                    ;2 E-clk |
-            PULA                    ;3 E-clk |
-            NOP                     ;1 E-clk |
-            NOP                     ;1 E-clk |
-            NOP                     ;1 E-clk |
-            NOP                     ;1 E-clk |
-            NOP                     ;1 E-clk |
-            NOP                     ;1 E-clk |
-            NOP                     ;1 E-clk |
-            NOP                     ;1 E-clk |
-            PSHA                    ;2 E-clk | 50us
-            PULA                    ;3 E-clk |
-            NOP                     ;1 E-clk |
-            NOP                     ;1 E-clk |
-            DBNE  X,iloop           ;3 E-clk -
-            DBNE  Y,eloop           ;3 E-clk
-            PULX                    ;3 E-clk
+            PSHX                  ;2 E-clk
+eloop:      LDX   #30             ;2 E-clk -
+iloop:      PSHA                  ;2 E-clk |
+            PULA                  ;3 E-clk |
             
-            RTS                     ;5 E-clk, Return
+            PSHA                  ;2 E-clk
+            PULA                  ;3 E-clk
+            PSHA                  ;2 E-clk
+            PULA                  ;3 E-clk
+            PSHA                  ;2 E-clk
+            PULA                  ;3 E-clk
+                                  ;        |
+            PSHA                  ;2 E-clk | 50us
+            PULA                  ;3 E-clk |
+            NOP                   ;1 E-clk |
+            NOP                   ;1 E-clk |
+            DBNE  X,iloop         ;3 E-clk -
+            DBNE  Y,eloop         ;3 E-clk
+            PULX                  ;3 E-clk
+            RTS                   ;5 E-clk
+            
 
 ; ************************ BIN_2_ASCII ************************            
 ; leftHLF 
@@ -149,7 +154,7 @@ sendData
 
 ; sendToLCD - Send command stored in ACCA to the LCD
 sendToLCD
-          BCLR LCD_CONTROL, LCD_RST ; Select LCD Instruction Registor (IR)
+          BCLR LCD_CONTROL, LCD_RS  ; Select LCD Instruction Registor (IR)
           JSR sendData              ; Send LCD Data
           
           RTS                       ; Return
@@ -177,6 +182,8 @@ lcdInit
           
           LDAA #$06                 ; Move cursor RIGHT after entering a character
           JSR sendToLCD             ; Send ACCA -> LCD
+          
+          RTS
 
 ; lcdClear - Clear display and home cursor
 lcdClear
@@ -199,9 +206,14 @@ donePS    RTS                       ; Return
 
 ; lcdWriteChar - Write a char from ACCA -> LCD
 lcdWriteChar
-          BSET  LCD_CONTROL, LCD_RST; Select the LCD Data Register (DR)
+          BSET  LCD_CONTROL, LCD_RS ; Select the LCD Data Register (DR)
           JSR   sendData            ; Send data to Data Register (DR)
           
           RTS                       ; Return
-          
+
+;**************************************************************
+;*                 Interrupt Vectors                          *
+;**************************************************************
+            ORG   $FFFE
+            DC.W  Entry           ; Reset Vector          
           
