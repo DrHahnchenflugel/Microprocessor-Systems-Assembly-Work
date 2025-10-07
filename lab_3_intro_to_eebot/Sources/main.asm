@@ -55,7 +55,7 @@ lbl
             BRCLR ATDSTAT0,$80,*       ; wait until the conversion sequence is complete
             
             LDAA  ATDDR4L              ; Load the ch4 result into ACCA
-            LDAB  #30                  ; ACCB = 39
+            LDAB  #39                  ; ACCB = 39
             MUL                        ; ACCD = 1st result x 39
             ADDD  #600               ; ACCD = 1st result x 30 + 600
             
