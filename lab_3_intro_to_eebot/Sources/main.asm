@@ -1,11 +1,10 @@
 ;*****************************************************************
-;* This stationery serves as the framework for a                 *
-;* user application (single file, absolute assembly application) *
-;* For a more comprehensive program that                         *
-;* demonstrates the more advanced functionality of this          *
-;* processor, please see the demonstration applications          *
-;* located in the examples subdirectory of the                   *
-;* Freescale CodeWarrior for the HC12 Program directory          *
+;* This program demonstrates the use of the eebot's features:    
+;* - Reading from the Bumpers
+;* - Reading from the potentiometer
+;* - Writing to the LCD
+;* - Using the ADC to convert the potentiometer signal to
+;    a value usable by the digital controller
 ;*****************************************************************
 
 ; export symbols
@@ -16,7 +15,6 @@
 		INCLUDE 'derivative.inc' 
 
 ; variable/data section
-
             ORG   $3850
 ; Definitions
 LCD_DATA    EQU   PORTB           ;LCD DATA port, bits - PB7..PB0
@@ -53,18 +51,18 @@ _Startup:
             JSR   putsLCD              ; send msg1 to LCD
 
 lbl         
-            MOVB  #$90,ATDCTL5         ; r.just., unsign., sing.conv., mult., cl0, staart conv.
+            MOVB  #$90,ATDCTL5         ; r.just., unsign., sing.conv., mult., cl0, start conv.
             BRCLR ATDSTAT0,$80,*       ; wait until the conversion sequence is complete
             
-            LDAA  ATDDR4L                    ; Load the ch4 result into ACCA
-            LDAB  #30                    ; ACCB = 39
-            MUL                       ; ACCD = 1st result x 39
-            ADDD  #600                    ; ACCD = 1st result x 30 + 600
+            LDAA  ATDDR4L              ; Load the ch4 result into ACCA
+            LDAB  #30                  ; ACCB = 39
+            MUL                        ; ACCD = 1st result x 39
+            ADDD  #600               ; ACCD = 1st result x 30 + 600
             
             JSR   int2BCD
             JSR   BCD2ASC
             
-            LDAA  #$8F                    ; Move LCD cursor to first row, end of msg1
+            LDAA  #$8F                 ; Move LCD cursor to first row, end of msg1
             JSR   cmd2LCD              ; send cmd to LCD
             
             LDAA  TEN_THOUS            ; Output the TEN_THOUS ASCII character
@@ -82,24 +80,25 @@ lbl
             LDAA  #$CF                    ; Move LCD cursor to the 2nd row, end of msg2
             JSR   cmd2LCD
             
-            ;BRCLR  PORTAD0,...,bowON
-            ;LDAA    #$31               ; Output '1' if bow switch OFF
-            ;BRA   bowOFF
-;bowON       LDAA    #$30               ; Output '0' if bow switch ON
-;bowOFF      JSR     char2LCD           ; Send bow state to LCD
+            BRCLR  PORTAD0,%00000100,bowON
+            LDAA    #' '               ; Output ' ' if bow switch OFF
+            BRA   bowOFF
+bowON       LDAA    #'B'               ; Output 'B' if bow switch ON
+bowOFF      JSR     putcLCD            ; Send bow state to LCD
 
-            ; ... output a space character in ASCII
+            LDAA  #'|'
+            JSR   putcLCD              ; ... output a vertical line character in ASCII
             
-            ;BRCLR  PORTAD0,...,sternON
-;            LDAA    #$31               ; Output '1' if stern switch OFF
-;            BRA   sternOFF
-;sternON       LDAA    #$30               ; Output '0' if stern switch ON
-;sternOFF      JSR     char2LCD           ; Send stern state to LCD
-             
-            
-            JMP     lbl
+              BRCLR  PORTAD0,%00001000,sternON
+              LDAA    #' '               ; Output ' ' if stern switch OFF
+              BRA   sternOFF
+sternON       LDAA    #'S'               ; Output 'S' if stern switch ON
+sternOFF      JSR     putcLCD            ; Send stern state to LCD
+              JMP     lbl
+
 msg1        dc.b  "Battery volt ",0
-msg2        dc.b  "Sw status ",0
+msg2        dc.b  "Bumper status ",0
+
 
 ; Subroutine section
 initLCD
@@ -284,7 +283,7 @@ int2BCD       XGDX                      ;Save the binary number into .X
               STAB        TEN_THOUS
 ;*
 
-CON_EXIT      RTS                       ;We’re done the conversion
+CON_EXIT      RTS                       ;Weâ€™re done the conversion
 
 ;* file ref: bcdtoasc.asm
 ;*
@@ -294,65 +293,65 @@ CON_EXIT      RTS                       ;We’re done the conversion
 ;* This routine converts the BCD number in the BCD_BUFFER
 ;* into ascii format, with leading zero suppression.
 ;* Leading zeros are converted into space characters.
-;* The flag ’NO_BLANK’ starts cleared and is set once a non-zero
+;* The flag â€™NO_BLANKâ€™ starts cleared and is set once a non-zero
 ;* digit has been detected.
-;* The ’units’ digit is never blanked, even if it and all the
+;* The â€™unitsâ€™ digit is never blanked, even if it and all the
 ;* preceding digits are zero.
 ;* Peter Hiscocks
 BCD2ASC       LDAA        #0            ;Initialize the blanking flag
               STAA        NO_BLANK      
 ;*
-C_TTHOU       LDAA        TEN_THOUS     ;Check the ’ten_thousands’ digit
+C_TTHOU       LDAA        TEN_THOUS     ;Check the â€™ten_thousandsâ€™ digit
               ORAA        NO_BLANK
               BNE         NOT_BLANK1
 ;*
-ISBLANK1      LDAA        #' '            ;It’s blank
+ISBLANK1      LDAA        #' '            ;Itâ€™s blank
               STAA        TEN_THOUS       ;so store a space
-              BRA         C_THOU          ;and check the ’thousands’ digit
+              BRA         C_THOU          ;and check the â€™thousandsâ€™ digit
 ;*
-NOT_BLANK1    LDAA        TEN_THOUS       ;Get the ’ten_thousands’ digit
+NOT_BLANK1    LDAA        TEN_THOUS       ;Get the â€™ten_thousandsâ€™ digit
               ORAA        #$30            ;Convert to ascii
               STAA        TEN_THOUS
-              LDAA        #$1             ;Signal that we have seen a ’non-blank’ digit
+              LDAA        #$1             ;Signal that we have seen a â€™non-blankâ€™ digit
               STAA        NO_BLANK
 ;*
 C_THOU        LDAA        THOUSANDS       ;Check the thousands digit for blankness
-              ORAA        NO_BLANK        ;If it’s blank and ’no-blank’ is still zero
+              ORAA        NO_BLANK        ;If itâ€™s blank and â€™no-blankâ€™ is still zero
               BNE         NOT_BLANK2
 ;*
 ISBLANK2      LDAA        #' '            ;Thousands digit is blank
               STAA        THOUSANDS       ;so store a space
               BRA         C_HUNS          ;and; check the hundreds digit
 ;*
-NOT_BLANK2    LDAA        THOUSANDS       ;(similar to ’ten_thousands’ case)
+NOT_BLANK2    LDAA        THOUSANDS       ;(similar to â€™ten_thousandsâ€™ case)
               ORAA        #$30
               STAA        THOUSANDS
               LDAA        #$1
               STAA        NO_BLANK
 ;*
 C_HUNS        LDAA        HUNDREDS        ;Check the hundreds digit for blankness
-              ORAA        NO_BLANK        ;If it’s blank and ’no-blank’ is still zero
+              ORAA        NO_BLANK        ;If itâ€™s blank and â€™no-blankâ€™ is still zero
               BNE         NOT_BLANK3
 ;*
 ISBLANK3      LDAA        #' '            ;Hundreds digit is blank
               STAA        HUNDREDS        ;so store a space
               BRA         C_TENS          ;and check the tens digit
 ;*
-NOT_BLANK3    LDAA        HUNDREDS        ;(similar to ’ten_thousands’ case)
+NOT_BLANK3    LDAA        HUNDREDS        ;(similar to â€™ten_thousandsâ€™ case)
               ORAA        #$30
               STAA        HUNDREDS
               LDAA        #$1
               STAA        NO_BLANK
 ;*
 C_TENS        LDAA        TENS            ;Check the tens digit for blankness
-              ORAA        NO_BLANK        ;If it’s blank and ’no-blank’ is still zero
+              ORAA        NO_BLANK        ;If itâ€™s blank and â€™no-blankâ€™ is still zero
               BNE         NOT_BLANK4
 ;*
 ISBLANK4      LDAA        #' '            ;Tens digit is blank
               STAA        TENS            ;so store a space
               BRA         C_UNITS         ;and check the units digit
 ;*
-NOT_BLANK4    LDAA        TENS            ;(similar to ’ten_thousands’ case)
+NOT_BLANK4    LDAA        TENS            ;(similar to â€™ten_thousandsâ€™ case)
               ORAA        #$30
               STAA        TENS
 ;*
@@ -360,7 +359,7 @@ C_UNITS       LDAA        UNITS           ;No blank check necessary, convert to 
               ORAA        #$30
               STAA        UNITS
 ;*
-              RTS                         ;We’re done
+              RTS                         ;Weâ€™re done
 
 ;**************************************************************
 ;*                 Interrupt Vectors                          *
