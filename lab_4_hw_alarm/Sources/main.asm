@@ -25,7 +25,6 @@ LCD_RS      EQU   $40                       ; LCD RS-signal pin
 TOF_COUNTER RMB   1                         ; The timer, incremented at 23Hz
 AT_DEMO     RMB   1                         ; The alarm time for this demo
 
-
 ; code section
             ORG   $4000
 Entry:
@@ -63,8 +62,10 @@ A2          LDAA  #'C'                      ; Display C (forever)
             SWI
 
 ;subroutine section
-;Initialization of the LCD: 4-bit data width, 2-line display,
-;turn on display, cursor and blinking off. Shift cursor right
+;*******************************************************************
+;*  Initialization of the LCD: 4-bit data width, 2-line display,   *
+;*  turn on display, cursor and blinking off. Shift cursor right.  *
+;*******************************************************************
 initLCD     BSET  DDRB,%11111111            ; configure pins PB7,PB6,PB5,PB4,PB3,PB2,PB1,PB0 for output
             BSET  DDRJ,%11000000            ; configure pins PJ7,PJ6 for output
             LDY   #2000                     ; wait for LCD to be ready
@@ -77,14 +78,18 @@ initLCD     BSET  DDRB,%11111111            ; configure pins PB7,PB6,PB5,PB4,PB3
             JSR   cmd2LCD                   ; -"-
             RTS
 
-;Clear display and home cursor
+;*******************************************************************
+;*                  Clear display and home cursor                  *
+;*******************************************************************
 clrLCD      LDAA  #$01                      ; clear cursor and return to home position
             JSR   cmd2LCD                   ; -"-
             LDY   #40                       ; wait until "clear cursor" command is complete
             JSR   del_50us                  ; -"-
             RTS
 
-;([Y] x 50us)-delay subroutine. E-clk=41,67ns.
+;*******************************************************************
+;*          ([Y] x 50us)-delay subroutine. E-clk=41,67ns.          *
+;*******************************************************************
 del_50us:   PSHX                            ;2 E-clk
 eloop:      LDX   #30                       ;2 E-clk -
 iloop:      PSHA                            ;2 E-clk |
@@ -106,17 +111,23 @@ iloop:      PSHA                            ;2 E-clk |
             PULX                            ;3 E-clk
             RTS
 
-;This function sends a command in accumulator A to the LCD
+;*******************************************************************
+;*    This function sends a command in accumulator A to the LCD    *
+;*******************************************************************
 cmd2LCD:    BCLR  LCD_CNTR,LCD_RS           ; select the LCD Instruction Register (IR)
             JSR   dataMov                   ; send data to IR
             RTS
 
-;This function outputs the character in accumulator in A to LCD
+;*******************************************************************
+;* This function outputs the character in accumulator in A to LCD  *
+;*******************************************************************
 putcLCD     BSET  LCD_CNTR,LCD_RS           ; select the LCD Data register (DR)
             JSR   dataMov                   ; send data to DR
             RTS
 
-;This function sends data to the LCD IR or DR depening on RS
+;*******************************************************************
+;*   This function sends data to the LCD IR or DR depening on RS   *
+;*******************************************************************
 dataMov     BSET  LCD_CNTR,LCD_E            ; pull the LCD E-sigal high
             STAA  LCD_DAT                   ; send the upper 4 bits of data to LCD
             BCLR  LCD_CNTR,LCD_E            ; pull the LCD E-signal low to complete the write oper.
@@ -150,7 +161,9 @@ TOF_ISR     INC   TOF_COUNTER
             STAA  TFLG2                     ; TOF
             RTI
 
-;Interrupt Vectors
+;**************************************************************
+;*                 Interrupt Vectors                          *
+;**************************************************************
             ORG   $FFFE
             DC.W  Entry                     ; Reset Vector
 
