@@ -1,0 +1,739 @@
+;===============================================================================
+; COE538 Final Project - Line Follower Only
+;===============================================================================
+
+            XDEF    Entry, _Startup
+            ABSENTRY Entry
+            INCLUDE "derivative.inc"
+
+;===============================================================================
+; LCD EQUATES (from guider code)
+;===============================================================================
+
+CLEAR_HOME      EQU   $01      ; Clear display and home cursor
+INTERFACE       EQU   $38      ; 8-bit, 2 line, 5x8 font
+CURSOR_OFF      EQU   $0C      ; Display on, cursor off
+SHIFT_OFF       EQU   $06      ; Address increments, no char shift
+LCD_SEC_LINE    EQU   64       ; DDRAM addr of 2nd line
+
+LCD_CNTR        EQU   PTJ      ; LCD control: E=PJ7, RS=PJ6
+LCD_DAT         EQU   PORTB    ; LCD data: PB7..PB0
+LCD_E           EQU   $80
+LCD_RS          EQU   $40
+
+NULL            EQU   0
+SPACE           EQU   ' '
+
+;===============================================================================
+; TUNABLE PARAMETERS
+;===============================================================================
+
+; CdS thresholds: ADC >= threshold => treat as "black tape"
+FORE_PATTERN_THRESH     EQU   $A0   ; A (bow)
+MID_PATTERN_THRESH      EQU   $A0   ; C (mid)
+PORT_PATTERN_THRESH     EQU   $A0   ; B (port)  (debug only for now)
+STAR_PATTERN_THRESH     EQU   $A0   ; D (stbd)  (debug only for now)
+
+; E/F differential thresholds:
+; value <  DIFF_LINE_MIN_THRESH => too far right
+; value >  DIFF_LINE_MAX_THRESH => too far left
+DIFF_LINE_MIN_THRESH    EQU   $60
+DIFF_LINE_MAX_THRESH    EQU   $A0
+
+; Sensor settle delay: ticks * 50us
+SENSOR_SETTLE_TICKS     EQU   400   ; 400*50us ≈ 20ms (safe starting point)
+
+; Extra main-loop delay: MAIN_DELAY_TICKS * 50us
+MAIN_DELAY_TICKS        EQU   0     ; 0 = no extra delay
+
+; Line-lock persistence (iterations)
+AC_DARK_LOCK_MIN        EQU   3     ; need >= this many A/C-dark samples to lock
+ALL_WHITE_CLEAR_MIN     EQU   5     ; need >= this many all-white samples to clear
+
+;===============================================================================
+; STATES
+;===============================================================================
+
+STATE_LEFT_TURN         EQU   0
+STATE_RIGHT_TURN        EQU   1
+STATE_FWD               EQU   2
+
+;===============================================================================
+; RAM SECTION
+;===============================================================================
+
+            ORG   $3800
+
+; Raw sensor storage (contiguous)
+SENSOR_LINE   FCB   $00      ; 0: E/F differential
+SENSOR_BOW    FCB   $00      ; 1: A
+SENSOR_PORT   FCB   $00      ; 2: B
+SENSOR_MID    FCB   $00      ; 3: C
+SENSOR_STBD   FCB   $00      ; 4: D
+
+SENSOR_NUM    RMB   1        ; current sensor index 0..4
+
+; Threshold flags
+FWD_DETECT    DC.B  0        ; A sees tape
+MID_DETECT    DC.B  0        ; C sees tape
+LEFT_DETECT   DC.B  0        ; B sees tape (debug)
+RIGHT_DETECT  DC.B  0        ; D sees tape (debug)
+
+LF_TOO_LEFT   DC.B  0        ; E/F says robot too far left
+LF_TOO_RIGHT  DC.B  0        ; E/F says robot too far right
+
+; Line lock
+HAVE_LINE     DC.B  0        ; 1 = locked on line
+AC_DARK_CNT   DC.B  0        ; consecutive samples with A,C dark
+ALL_LIGHT_CNT DC.B  0        ; consecutive samples with A,B,C,D all white
+
+; State + misc
+CRNT_STATE    DC.B  STATE_FWD
+TEMP          RMB   1
+
+; LCD buffers
+TOP_LINE      FCC   "                    "
+              FCB   NULL
+BOT_LINE      FCC   "                    "
+              FCB   NULL
+CLEAR_LINE    FCC   "                    "
+              FCB   NULL
+
+; Hex table for BIN2ASC
+HEX_TABLE     FCC   "0123456789ABCDEF"
+
+;===============================================================================
+; CODE SECTION
+;===============================================================================
+
+            ORG   $4000
+
+;---------------------------------------------------------------------------
+; Entry / Reset
+;---------------------------------------------------------------------------
+Entry:
+_Startup:
+            LDS   #$4000           ; Stack pointer
+            CLI                    ; Enable interrupts
+
+            JSR   INIT             ; Ports
+            JSR   openADC          ; ATD
+            JSR   openLCD          ; LCD
+            JSR   CLR_LCD_BUF
+
+            JSR   STAROFF          ; motors off
+            JSR   PORTOFF
+            MOVB  #STATE_FWD, CRNT_STATE
+            CLR   HAVE_LINE
+
+;---------------------------------------------------------------------------
+; Main loop: line follower only
+;---------------------------------------------------------------------------
+MAIN:
+            JSR   G_LEDS_ON        ; guider LEDs on for all sensors
+            JSR   READ_SENSORS     ; read 5 sensors into SENSOR_* and update flags/lock
+            JSR   G_LEDS_OFF
+
+            JSR   DISPLAY_SENSORS  ; debug: state + sensor values
+
+            JSR   STATE_ASSIGNER   ; HAVE_LINE + E/F -> state
+            JSR   DISPATCHER       ; drive motors
+
+            LDY   #MAIN_DELAY_TICKS
+            JSR   del_50us         ; usually 0
+
+            BRA   MAIN
+
+;===============================================================================
+; INITIALIZATION
+;===============================================================================
+
+;---------------------------------------------------------------------------
+; Initialize ports (from guider code)
+;---------------------------------------------------------------------------
+INIT:
+            BCLR  DDRAD,$FF        ; PORTAD input (switches etc.)
+            BSET  DDRA,$FF         ; PORTA output (motors + guider select + LEDs)
+            BSET  DDRB,$FF         ; PORTB output (LCD data)
+            BSET  DDRJ,$C0         ; PTJ7,6 outputs (LCD control)
+            BSET  DDRT,%00110000   ; PTT5,4 outputs (motor enables)
+            RTS
+
+;---------------------------------------------------------------------------
+; Initialize ADC (ATD) (from guider code)
+;---------------------------------------------------------------------------
+openADC:
+            MOVB  #$80,ATDCTL2     ; power up ATD
+            LDY   #1               ; 50us delay
+            JSR   del_50us
+            MOVB  #$20,ATDCTL3     ; 4 conversions on AN1
+            MOVB  #$97,ATDCTL4     ; 8-bit, prescaler=48
+            RTS
+
+;===============================================================================
+; STATE MACHINE
+;===============================================================================
+
+;---------------------------------------------------------------------------
+; STATE_ASSIGNER
+; - If HAVE_LINE = 1: use E/F to choose LEFT / RIGHT / FWD
+; - If HAVE_LINE = 0: default to FWD
+;---------------------------------------------------------------------------
+STATE_ASSIGNER:
+            LDAA  HAVE_LINE
+            CMPA  #1
+            BNE   NO_LINE
+
+            ; have line: steer with E/F
+            LDAA  LF_TOO_LEFT
+            CMPA  #1
+            BEQ   SET_RIGHT_TURN
+
+            LDAA  LF_TOO_RIGHT
+            CMPA  #1
+            BEQ   SET_LEFT_TURN
+
+            ; centred
+            MOVB  #STATE_FWD, CRNT_STATE
+            BRA   SA_EXIT
+
+SET_RIGHT_TURN:
+            MOVB  #STATE_RIGHT_TURN, CRNT_STATE
+            BRA   SA_EXIT
+
+SET_LEFT_TURN:
+            MOVB  #STATE_LEFT_TURN, CRNT_STATE
+            BRA   SA_EXIT
+
+NO_LINE:
+            ; no line lock: keep rolling forward
+            MOVB  #STATE_FWD, CRNT_STATE
+
+SA_EXIT:
+            RTS
+
+;---------------------------------------------------------------------------
+; DISPATCHER
+; - Drives motors according to CRNT_STATE
+;   PTT5 = STAR_SPEED, PTT4 = PORT_SPEED (enable)
+;   PORTA bit1 = STAR dir, bit0 = PORT dir
+;---------------------------------------------------------------------------
+DISPATCHER:
+            LDAA  CRNT_STATE
+
+            CMPA  #STATE_LEFT_TURN
+            BNE   CHK_RIGHT
+            ; left turn: starboard fwd, port rev
+            JSR   STARON
+            JSR   PORTON
+            JSR   STARFWD
+            JSR   PORTREV
+            BRA   DISP_EXIT
+
+CHK_RIGHT:
+            CMPA  #STATE_RIGHT_TURN
+            BNE   CHK_FWD
+            ; right turn: starboard rev, port fwd
+            JSR   STARON
+            JSR   PORTON
+            JSR   STARREV
+            JSR   PORTFWD
+            BRA   DISP_EXIT
+
+CHK_FWD:
+            CMPA  #STATE_FWD
+            BNE   BAD_STATE
+            ; forward both
+            JSR   STARON
+            JSR   PORTON
+            JSR   STARFWD
+            JSR   PORTFWD
+            BRA   DISP_EXIT
+
+BAD_STATE:
+            ; fail-safe: stop motors
+            JSR   STAROFF
+            JSR   PORTOFF
+
+DISP_EXIT:
+            RTS
+
+;===============================================================================
+; MOTOR CONTROL
+;===============================================================================
+
+STARON:
+            LDAA PTT
+            ORAA #%00100000        ; set PTT5
+            STAA PTT
+            RTS
+
+STAROFF:
+            LDAA PTT
+            ANDA #%11011111        ; clear PTT5
+            STAA PTT
+            RTS
+
+PORTON:
+            LDAA PTT
+            ORAA #%00010000        ; set PTT4
+            STAA PTT
+            RTS
+
+PORTOFF:
+            LDAA PTT
+            ANDA #%11101111        ; clear PTT4
+            STAA PTT
+            RTS
+
+STARFWD:
+            LDAA PORTA
+            ANDA #%11111101        ; clear bit1
+            STAA PORTA
+            RTS
+
+STARREV:
+            LDAA PORTA
+            ORAA #%00000010        ; set bit1
+            STAA PORTA
+            RTS
+
+PORTFWD:
+            LDAA PORTA
+            ANDA #%11111110        ; clear bit0
+            STAA PORTA
+            RTS
+
+PORTREV:
+            LDAA PORTA
+            ORAA #%00000001        ; set bit0
+            STAA PORTA
+            RTS
+
+;===============================================================================
+; GUIDER LED CONTROL (global enable)
+;===============================================================================
+
+G_LEDS_ON:
+            BSET  PORTA,%00100000  ; bit5 = guider LED enable
+            RTS
+
+G_LEDS_OFF:
+            BCLR  PORTA,%00100000
+            RTS
+
+;===============================================================================
+; SENSOR SELECTION / READING
+;===============================================================================
+
+;---------------------------------------------------------------------------
+; SELECT_SENSOR
+; - Sensor number in A (0..4)
+; - Uses PORTA bits 2..4 as selection lines (from guider code)
+;---------------------------------------------------------------------------
+SELECT_SENSOR:
+            PSHA
+            LDAA  PORTA
+            ANDA  #%11100011       ; clear bits 2..4
+            STAA  TEMP
+            PULA                    ; sensor number 0..4
+            ASLA
+            ASLA                    ; shift into bits 2..4
+            ANDA  #%00011100
+            ORAA  TEMP
+            STAA  PORTA
+            RTS
+
+;---------------------------------------------------------------------------
+; READ_SENSORS
+; - LEDs are already ON when called
+; - For each sensor 0..4:
+;   * select it
+;   * wait for CdS to settle
+;   * read ATD (AN1)
+; - Then threshold flags + update HAVE_LINE
+;---------------------------------------------------------------------------
+READ_SENSORS:
+            CLR   SENSOR_NUM
+            LDX   #SENSOR_LINE
+
+RS_LOOP:
+            ; select sensor
+            LDAA  SENSOR_NUM
+            JSR   SELECT_SENSOR
+
+            ; CdS settle time
+            LDY   #SENSOR_SETTLE_TICKS
+            JSR   del_50us
+
+            ; start A/D conversion on AN1
+            LDAA  #%10000001
+            STAA  ATDCTL5
+            BRCLR ATDSTAT0,$80,*   ; wait for conversion done
+
+            LDAA  ATDDR0L          ; 8-bit result
+            STAA  0,X
+
+            CPX   #SENSOR_STBD
+            BEQ   RS_DONE
+
+            INC   SENSOR_NUM
+            INX
+            BRA   RS_LOOP
+
+RS_DONE:
+            JSR   UPDATE_FLAGS_AND_LOCK
+            RTS
+
+;---------------------------------------------------------------------------
+; UPDATE_FLAGS_AND_LOCK
+; - Threshold A,B,C,D,E/F into flags
+; - Maintains HAVE_LINE using A/C only:
+;   * AC_DARK_CNT increments when A and C see tape
+;   * ALL_LIGHT_CNT increments when all four A,B,C,D see white
+;   * HAVE_LINE set when AC_DARK_CNT >= AC_DARK_LOCK_MIN
+;   * HAVE_LINE cleared when ALL_LIGHT_CNT >= ALL_WHITE_CLEAR_MIN
+;---------------------------------------------------------------------------
+UPDATE_FLAGS_AND_LOCK:
+            ;---- A (bow) -> FWD_DETECT ----
+            LDAA  SENSOR_BOW
+            CMPA  #FORE_PATTERN_THRESH
+            BLT   A_WHITE
+            MOVB  #1, FWD_DETECT
+            BRA   THRESH_B
+A_WHITE:
+            MOVB  #0, FWD_DETECT
+
+THRESH_B:
+            ;---- B (port) -> LEFT_DETECT ----
+            LDAA  SENSOR_PORT
+            CMPA  #PORT_PATTERN_THRESH
+            BLT   B_WHITE
+            MOVB  #1, LEFT_DETECT
+            BRA   THRESH_C
+B_WHITE:
+            MOVB  #0, LEFT_DETECT
+
+THRESH_C:
+            ;---- C (mid) -> MID_DETECT ----
+            LDAA  SENSOR_MID
+            CMPA  #MID_PATTERN_THRESH
+            BLT   C_WHITE
+            MOVB  #1, MID_DETECT
+            BRA   THRESH_D
+C_WHITE:
+            MOVB  #0, MID_DETECT
+
+THRESH_D:
+            ;---- D (stbd) -> RIGHT_DETECT ----
+            LDAA  SENSOR_STBD
+            CMPA  #STAR_PATTERN_THRESH
+            BLT   D_WHITE
+            MOVB  #1, RIGHT_DETECT
+            BRA   THRESH_EF
+D_WHITE:
+            MOVB  #0, RIGHT_DETECT
+
+THRESH_EF:
+            ;---- E/F -> LF_TOO_RIGHT / LF_TOO_LEFT ----
+            LDAA  SENSOR_LINE
+
+            CMPA  #DIFF_LINE_MIN_THRESH
+            BLT   SET_TOO_RIGHT
+            MOVB  #0, LF_TOO_RIGHT
+            BRA   CHK_EF_LEFT
+SET_TOO_RIGHT:
+            MOVB  #1, LF_TOO_RIGHT
+
+CHK_EF_LEFT:
+            CMPA  #DIFF_LINE_MAX_THRESH
+            BGT   SET_TOO_LEFT
+            MOVB  #0, LF_TOO_LEFT
+            BRA   UPDATE_LOCK
+SET_TOO_LEFT:
+            MOVB  #1, LF_TOO_LEFT
+
+;-------------------------------
+; Line lock based on A,C only
+;-------------------------------
+UPDATE_LOCK:
+            ; A and C see tape?
+            LDAA  FWD_DETECT
+            CMPA  #1
+            BNE   NOT_AC_DARK
+
+            LDAA  MID_DETECT
+            CMPA  #1
+            BNE   NOT_AC_DARK
+
+            ; good A/C pattern
+            LDAA  AC_DARK_CNT
+            CMPA  #250
+            BHS   SKIP_AC_INC
+            INCA
+            STAA  AC_DARK_CNT
+SKIP_AC_INC:
+            BRA   CHECK_ALL_WHITE
+
+NOT_AC_DARK:
+            CLR   AC_DARK_CNT
+
+CHECK_ALL_WHITE:
+            ; all four white?
+            LDAA  FWD_DETECT
+            ORAA  MID_DETECT
+            ORAA  LEFT_DETECT
+            ORAA  RIGHT_DETECT
+            BNE   NOT_ALL_WHITE
+
+            LDAA  ALL_LIGHT_CNT
+            CMPA  #250
+            BHS   SKIP_LIGHT_INC
+            INCA
+            STAA  ALL_LIGHT_CNT
+SKIP_LIGHT_INC:
+            BRA   UPDATE_HAVE_LINE
+
+NOT_ALL_WHITE:
+            CLR   ALL_LIGHT_CNT
+
+UPDATE_HAVE_LINE:
+            ; lock after AC_DARK_LOCK_MIN good A/C samples
+            LDAA  AC_DARK_CNT
+            CMPA  #AC_DARK_LOCK_MIN
+            BLO   MAYBE_CLEAR
+            MOVB  #1, HAVE_LINE
+            BRA   FLAGS_DONE
+
+MAYBE_CLEAR:
+            ; clear after ALL_WHITE_CLEAR_MIN all-white samples
+            LDAA  ALL_LIGHT_CNT
+            CMPA  #ALL_WHITE_CLEAR_MIN
+            BLO   FLAGS_DONE
+            CLR   HAVE_LINE
+
+FLAGS_DONE:
+            RTS
+
+;===============================================================================
+; LCD / DISPLAY
+;===============================================================================
+
+;---------------------------------------------------------------------------
+; Clear LCD buffer (TOP_LINE / BOT_LINE)
+;---------------------------------------------------------------------------
+CLR_LCD_BUF:
+            LDX   #CLEAR_LINE
+            LDY   #TOP_LINE
+            JSR   STRCPY
+            LDX   #CLEAR_LINE
+            LDY   #BOT_LINE
+            JSR   STRCPY
+            RTS
+
+;---------------------------------------------------------------------------
+; STRCPY: copy null-terminated string at X to Y
+;---------------------------------------------------------------------------
+STRCPY:
+            PSHX
+            PSHY
+            PSHA
+SC_LOOP:
+            LDAA  0,X
+            STAA  0,Y
+            BEQ   SC_EXIT
+            INX
+            INY
+            BRA   SC_LOOP
+SC_EXIT:
+            PULA
+            PULY
+            PULX
+            RTS
+
+;---------------------------------------------------------------------------
+; BIN2ASC: 8-bit in A → hex ASCII in A (MS) and B (LS)
+;---------------------------------------------------------------------------
+BIN2ASC:
+            PSHA
+            TAB
+            ANDB #%00001111
+            CLRA
+            ADDD #HEX_TABLE
+            XGDX
+            LDAA 0,X             ; low nibble char
+            PULB                  ; original value
+            PSHA                  ; push low char
+            RORB
+            RORB
+            RORB
+            RORB
+            ANDB #%00001111
+            CLRA
+            ADDD #HEX_TABLE
+            XGDX
+            LDAA 0,X             ; high nibble char
+            PULB                  ; low nibble char into B
+            RTS                   ; A=high, B=low
+
+;---------------------------------------------------------------------------
+; LCD init and helpers (from guider code)
+;---------------------------------------------------------------------------
+openLCD:
+            LDY   #2000
+            JSR   del_50us
+            LDAA  #INTERFACE
+            JSR   cmd2LCD
+            LDAA  #CURSOR_OFF
+            JSR   cmd2LCD
+            LDAA  #SHIFT_OFF
+            JSR   cmd2LCD
+            LDAA  #CLEAR_HOME
+            JSR   cmd2LCD
+            LDY   #40
+            JSR   del_50us
+            RTS
+
+cmd2LCD:
+            BCLR  LCD_CNTR,LCD_RS
+            JSR   dataMov
+            RTS
+
+putcLCD:
+            BSET  LCD_CNTR,LCD_RS
+            JSR   dataMov
+            RTS
+
+putsLCD:
+            LDAA  1,X+
+            BEQ   donePS
+            JSR   putcLCD
+            BRA   putsLCD
+donePS:
+            RTS
+
+dataMov:
+            BSET  LCD_CNTR,LCD_E
+            STAA  LCD_DAT
+            NOP
+            NOP
+            NOP
+            BCLR  LCD_CNTR,LCD_E
+            LDY   #1
+            JSR   del_50us
+            RTS
+
+LCD_POS_CRSR:
+            ORAA  #%10000000
+            JSR   cmd2LCD
+            RTS
+
+;---------------------------------------------------------------------------
+; DISPLAY_SENSORS
+; - Top line: state text
+; - Bottom line: A,B,C,D,E/F hex values
+;---------------------------------------------------------------------------
+DP_FRONT_SENSOR  EQU  BOT_LINE+0
+DP_PORT_SENSOR   EQU  BOT_LINE+3
+DP_MID_SENSOR    EQU  BOT_LINE+6
+DP_STBD_SENSOR   EQU  BOT_LINE+9
+DP_LINE_SENSOR   EQU  BOT_LINE+12
+
+STATE_TAB:
+            DC.B  "LF-LEFT ",0
+            DC.B  "LF-RGHT ",0
+            DC.B  "LF-FWD  ",0
+
+DISPLAY_SENSORS:
+            ; clear buffers
+            LDX   #CLEAR_LINE
+            LDY   #TOP_LINE
+            JSR   STRCPY
+            LDX   #CLEAR_LINE
+            LDY   #BOT_LINE
+            JSR   STRCPY
+
+            ; top line: state text
+            LDAB  CRNT_STATE
+            LSLB
+            LSLB
+            LSLB
+            LDX   #STATE_TAB
+            ABX
+            LDY   #TOP_LINE
+            JSR   STRCPY
+
+            ; bottom line: raw sensor hex
+
+            ; A (bow)
+            LDAA  SENSOR_BOW
+            JSR   BIN2ASC
+            LDX   #DP_FRONT_SENSOR
+            STAA 0,X
+            STAB 1,X
+
+            ; B (port)
+            LDAA  SENSOR_PORT
+            JSR   BIN2ASC
+            LDX   #DP_PORT_SENSOR
+            STAA 0,X
+            STAB 1,X
+
+            ; C (mid)
+            LDAA  SENSOR_MID
+            JSR   BIN2ASC
+            LDX   #DP_MID_SENSOR
+            STAA 0,X
+            STAB 1,X
+
+            ; D (stbd)
+            LDAA  SENSOR_STBD
+            JSR   BIN2ASC
+            LDX   #DP_STBD_SENSOR
+            STAA 0,X
+            STAB 1,X
+
+            ; E/F (line)
+            LDAA  SENSOR_LINE
+            JSR   BIN2ASC
+            LDX   #DP_LINE_SENSOR
+            STAA 0,X
+            STAB 1,X
+
+            ; push to LCD
+            LDAA  #CLEAR_HOME
+            JSR   cmd2LCD
+            LDY   #40
+            JSR   del_50us
+
+            LDX   #TOP_LINE
+            JSR   putsLCD
+
+            LDAA  #LCD_SEC_LINE
+            JSR   LCD_POS_CRSR
+            LDX   #BOT_LINE
+            JSR   putsLCD
+
+            RTS
+
+;===============================================================================
+; DELAY (from guider code)
+;===============================================================================
+
+del_50us:
+            PSHX
+eloop:
+            LDX   #300
+iloop:
+            NOP
+            DBNE  X,iloop
+            DBNE  Y,eloop
+            PULX
+            RTS
+
+;===============================================================================
+; VECTORS
+;===============================================================================
+
+            ORG   $FFFE
+            DC.W  Entry
