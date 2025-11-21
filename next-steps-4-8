@@ -1,0 +1,44 @@
+4.7 is going to be the bugfixed and tested version of 4-6
+by that point, I will have a robot that should be able to finish the maze semi-consistently (8+/10 times)
+i will also have an array of intersections that the robot remembered.
+
+what is to be implemented next in 4-8 is the autonomous intersection follower code:
+
+========================================================================================================================================
+
+1. if the back bumper is pressed, set state to awaiting auton
+2. iff state is awaiting auton and fwd bumper pressed, start driving fwd with a flag auton_drive set to true
+
+3. in the driving code, in the intersection code, 
+	if auton_drive is true, 
+		if the robot detects an intersection,
+		THEN it will turn following the intersection direction in the array and increment a counter
+
+4. the intersection direction can be left, right, or fwd. to determine which,
+	i can say current_heading (NESW = 0123) vs desired heading (NESW = 0123)
+
+5a. if fwd is desired, e.g., N > N, the difference will be 0, so go fwd
+5b. if left is desired, e.g., N > W, or S>E, the difference will be 1 (or, in the case of N>W -3, which mod4-s to 1)
+5c. if right is desired, e.g., N>E or S>W, the difference will be -1 (or, in the case of W>N, 3, which mod4-s to 1 )
+
+5d. based off the delta bw headings, we can turn the robot (remember to increment counter)
+
+========================================================================================================================================
+
+in the incredibly unlikely chance i manage to implement this on time, for bonus marks, i can implement 4-9, which is a reverse driving code. namely:
+if the back bumper is pressed, set state to return
+iff state is return we follow a similar path to 4-8, but we need the inverse directions, which will be stored in a second array.
+this array will be filled up as the robot makes its first discovery trek through the maze (i.e., when it arrives at an intersection, it'll not only log
+the direction in which it's heading, but the direction whence it came from, iff the robot is approaching the intersection in search mode, not backtrack mode).
+
+then, if the back bumper is pressed AND the robot is in return state, we have the robot turn around and set state to await_auton, and then proceed as in 4-8.
+
+========================================================================================================================================
+
+process:
+- test 4-6 code on robot, fix bugs
+- save as 4-7
+- implement 4-8 for full marks
+- quadrouple check 4-8.
+- if time permits, implement 4-9 for bonus marks.
+- good luck me.
